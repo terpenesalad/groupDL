@@ -60,8 +60,10 @@ jobs:
           path: dist/${{ matrix.artifact }}
 
   release:
+    # Runs for a pushed v* tag, or when started by hand from the Actions tab
+    # (the tag is then made from the version in groupdl/__init__.py).
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,8 +76,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la artifacts
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
           else
-            gh release create "$GITHUB_REF_NAME" artifacts/* --title "groupDL $GITHUB_REF_NAME" --notes-file docs/RELEASE_NOTES.md
+            TAG="v$(python3 -c 'import re; print(re.search(r"__version__ = \"(.+?)\"", open("groupdl/__init__.py").read()).group(1))')"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "groupDL $TAG" --notes-file docs/RELEASE_NOTES.md
           fi
