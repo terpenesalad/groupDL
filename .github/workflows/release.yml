@@ -45,12 +45,16 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
+      - name: Download ffmpeg
+        run: python scripts/fetch_ffmpeg.py build/ffmpeg
       - name: Build
-        run: python scripts/build.py
-      - name: Smoke test
+        shell: bash
+        run: python scripts/build.py --ffmpeg "build/ffmpeg/ffmpeg$([ "$RUNNER_OS" = Windows ] && echo .exe)"
+      - name: Check the built app joins video and sound
         shell: bash
         run: |
           "${{ matrix.built }}" --version
+          "${{ matrix.built }}" --self-test
       - name: Rename
         shell: bash
         run: mv "${{ matrix.built }}" "dist/${{ matrix.artifact }}"

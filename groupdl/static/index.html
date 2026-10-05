@@ -250,12 +250,16 @@ main { max-width: 1440px; margin: 0 auto; padding: 8px 24px 140px; }
 .folder { display: flex; gap: 4px; align-items: center; }
 .folder input {
   border: 1px solid var(--rule); border-radius: 8px; background: var(--table);
-  padding: 7px 10px; font-size: 13.5px; width: min(360px, 40vw);
+  padding: 7px 10px; font-size: 13.5px; width: min(250px, 22vw);
 }
 .dock .grow { flex: 1; }
 .overall { font-size: 13px; color: var(--ink-2); min-width: 0; }
-.overall .bar { width: 160px; height: 5px; background: var(--steel-soft); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.overall .bar { width: 120px; height: 5px; background: var(--steel-soft); border-radius: 3px; overflow: hidden; margin-top: 4px; }
 .overall .bar i { display: block; height: 100%; background: var(--steel); width: 0; transition: width .4s linear; }
+.btn.stop { color: var(--marker); border-color: var(--marker); background: transparent; }
+.btn.stop:hover { background: var(--marker-soft); border-color: var(--marker); }
+.btn.stop[hidden] { display: none; }
+#downloadBtn { margin-left: auto; }
 
 /* settings popover */
 .pop {
@@ -421,6 +425,7 @@ main { max-width: 1440px; margin: 0 auto; padding: 8px 24px 140px; }
     </div>
     <span class="grow"></span>
     <div class="overall" id="overall" hidden><span id="overallText"></span><div class="bar"><i id="overallBar"></i></div></div>
+    <button class="btn stop" type="button" id="stopAllDock" hidden>Stop all downloads</button>
     <button class="btn primary" type="button" id="downloadBtn" disabled>
       <svg><use href="#i-down"/></svg> <span id="downloadLabel">Download</span>
     </button>
@@ -435,7 +440,8 @@ main { max-width: 1440px; margin: 0 auto; padding: 8px 24px 140px; }
   </header>
   <div class="acts">
     <button class="btn quiet" type="button" id="cancelAll">Stop all</button>
-    <button class="btn quiet" type="button" id="retryAll">Retry failed</button>
+    <button class="btn quiet" type="button" id="cancelWaiting" title="Let the ones already downloading finish, and drop the rest">Stop waiting ones</button>
+    <button class="btn quiet" type="button" id="retryAll" title="Restart every download that failed or was stopped">Retry all</button>
     <button class="btn quiet" type="button" id="clearDone">Clear finished</button>
     <button class="btn quiet" type="button" id="openFolder2">Open folder</button>
   </div>
@@ -732,6 +738,14 @@ function paintJobs() {
     $("#overallText").textContent = `${done} of ${batch.length} finished`;
     $("#overallBar").style.width = `${(100 * prog / Math.max(batch.length, 1)).toFixed(1)}%`;
   } else overall.hidden = true;
+  const waiting = active.filter((j) => j.status === "queued").length;
+  $("#stopAllDock").hidden = active.length === 0;
+  $("#stopAllDock").textContent = `Stop all (${active.length})`;
+  $("#stopAllDock").title = `Stop all ${active.length} downloads that are running or waiting`;
+  $("#cancelAll").disabled = active.length === 0;
+  $("#cancelAll").textContent = active.length ? `Stop all (${active.length})` : "Stop all";
+  $("#cancelWaiting").disabled = waiting === 0;
+  $("#cancelWaiting").textContent = waiting ? `Stop waiting ones (${waiting})` : "Stop waiting ones";
 
   // cards
   S.jobsByVideo = new Map(S.jobs.map((j) => [j.video.id, j]));
@@ -748,6 +762,8 @@ function paintJobs() {
       thumb.append(el("div", { class: "jobstate done" }, job.status === "done" ? "Downloaded" : "Already downloaded"));
     } else if (job.status === "error") {
       thumb.append(el("div", { class: "jobstate error" }, "Failed"));
+    } else if (job.status === "cancelled") {
+      thumb.append(el("div", { class: "jobstate" }, "Stopped"));
     }
   });
 
@@ -795,7 +811,7 @@ async function poll() {
     paintJobs();
     const after = JSON.stringify(S.jobs.map((j) => [j.id, j.status]));
     if (before !== after) {
-      const finished = S.jobs.length && !st.busy && before.includes("downloading");
+      const finished = S.jobs.length && !st.busy && before.includes("downloading") && Date.now() - (S.stoppedAt || 0) > 5000;
       if (finished) {
         const ok = S.jobs.filter((j) => j.status === "done").length, bad = S.jobs.filter((j) => j.status === "error").length;
         toast(bad ? `Finished: ${ok} downloaded, ${bad} failed` : `Finished: ${ok} downloaded`, 4000);
@@ -943,7 +959,18 @@ document.addEventListener("keydown", (e) => {
 $("#openDrawer").addEventListener("click", () => setDrawer(true));
 $("#closeDrawer").addEventListener("click", () => setDrawer(false));
 $("#scrim").addEventListener("click", () => setDrawer(false));
-$("#cancelAll").addEventListener("click", () => api("/api/cancel", {}).then(poll));
+async function stopDownloads(waitingOnly) {
+  try {
+    S.stoppedAt = Date.now();
+    const r = await api("/api/cancel", { waiting_only: waitingOnly });
+    const n = r.stopped || 0;
+    toast(n ? `Stopped ${n} ${n === 1 ? "download" : "downloads"}. Use Retry all in Downloads to restart them.` : "Nothing to stop", 4000);
+  } catch (e) { toast(e.message, 4000); }
+  poll();
+}
+$("#cancelAll").addEventListener("click", () => stopDownloads(false));
+$("#stopAllDock").addEventListener("click", () => stopDownloads(false));
+$("#cancelWaiting").addEventListener("click", () => stopDownloads(true));
 $("#retryAll").addEventListener("click", () => api("/api/retry", {}).then(poll));
 $("#clearDone").addEventListener("click", () => api("/api/clear", {}).then(poll));
 $("#quit").addEventListener("click", async () => {

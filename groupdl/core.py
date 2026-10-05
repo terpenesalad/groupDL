@@ -11,7 +11,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Iterable
 
-from .tools import ytdlp_runtime_opts
+from .tools import has_audio, run_ffmpeg, ytdlp_runtime_opts
 
 # ---------------------------------------------------------------------------
 # URL handling
@@ -59,6 +59,11 @@ def clean_error(msg: str) -> str:
     msg = _ANSI_RE.sub("", str(msg)).strip()
     msg = re.sub(r"^(ERROR|WARNING):\s*", "", msg)
     msg = re.sub(r"^\[[^\]]+\]\s*(?:[\w@.-]+:\s+)?", "", msg)  # "[youtube] abc123: " prefix
+    if msg.startswith("Postprocessing:"):
+        detail = msg.split(":", 1)[-1].strip()
+        msg = "Couldn't join the video and its sound into one file."
+        if detail and "libpostproc" not in detail and len(detail) < 160:
+            msg += f" ({detail})"
     return msg
 
 
@@ -391,11 +396,12 @@ class Job:
     note: str | None = None
     created: float = field(default_factory=time.time)
     cancel_requested: bool = False
+    temp_files: set = field(default_factory=set)  # partial files to tidy up if the job fails or is stopped
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d.pop("settings")
-        d.pop("cancel_requested")
+        for private in ("settings", "cancel_requested", "temp_files"):
+            d.pop(private)
         return d
 
 
@@ -431,14 +437,21 @@ class DownloadManager:
             self._ensure_workers()
         return ids
 
-    def cancel(self, job_ids: list[str] | None = None) -> None:
+    def cancel(self, job_ids: list[str] | None = None, waiting_only: bool = False) -> int:
+        """Stop jobs. With no ids, stops everything (or only the ones not started yet)."""
+        stopped = 0
         with self._lock:
             for jid in job_ids or list(self._order):
                 job = self._jobs.get(jid)
-                if job and job.status in ACTIVE:
-                    job.cancel_requested = True
-                    if job.status == "queued":
-                        job.status = "cancelled"
+                if not job or job.status not in ACTIVE:
+                    continue
+                if waiting_only and job.status != "queued":
+                    continue
+                job.cancel_requested = True
+                stopped += 1
+                if job.status == "queued":
+                    job.status = "cancelled"
+        return stopped
 
     def retry(self, job_ids: list[str] | None = None) -> None:
         with self._lock:
@@ -516,6 +529,7 @@ class DownloadManager:
                         job.status, job.error = "cancelled", None
                     else:
                         job.status, job.error = "error", clean_error(exc) or "Download failed."
+                _remove_leftovers(job)
             finally:
                 with self._lock:
                     job.speed = job.eta = None
@@ -528,6 +542,9 @@ def _download_with_ytdlp(job: Job, manager: DownloadManager) -> None:
     state = {"part": 0, "parts": 1, "last_file": None}
 
     def progress_hook(d: dict) -> None:
+        for key in ("tmpfilename", "filename"):
+            if d.get(key):
+                job.temp_files.add(d[key])
         if job.cancel_requested:
             raise DownloadCancelled("Cancelled")
         info = d.get("info_dict") or {}
@@ -575,3 +592,105 @@ def _download_with_ytdlp(job: Job, manager: DownloadManager) -> None:
     os.makedirs(opts["paths"]["home"], exist_ok=True)
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([job.video["url"]])
+
+    # Make sure a video actually came out with sound. If it didn't (YouTube sometimes
+    # offers no matching audio, or the join failed), fetch the sound on its own and add it.
+    is_video = (job.settings.get("format") or "best") not in ("mp3", "m4a")
+    if is_video and job.status != "skipped" and job.filename and os.path.isfile(job.filename):
+        if not job.cancel_requested and not has_audio(job.filename):
+            try:
+                fixed = _add_missing_audio(job, manager)
+                manager.update(job, filename=fixed, note="Sound added after download")
+            except DownloadCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _forget_in_archive(opts.get("download_archive"), job.filename)
+                raise RuntimeError(
+                    "The video downloaded without sound and the sound couldn't be added "
+                    f"({clean_error(exc)}). The silent file was kept: {os.path.basename(job.filename)}"
+                ) from exc
+
+
+def _add_missing_audio(job: Job, manager: DownloadManager) -> str:
+    """Download just the audio track and mux it into the silent video. Returns the final path."""
+    import shutil
+    import tempfile
+
+    import yt_dlp
+    from yt_dlp.utils import DownloadCancelled
+
+    manager.update(job, status="processing", note="Adding missing sound")
+    video = job.filename
+    tmp = tempfile.mkdtemp(prefix="groupdl-")
+    try:
+        def hook(d: dict) -> None:
+            if job.cancel_requested:
+                raise DownloadCancelled("Cancelled")
+
+        opts = {
+            **base_opts(job.settings),
+            "format": "ba/ba*",
+            "format_sort": ["acodec:m4a"],
+            "paths": {"home": tmp},
+            "outtmpl": {"default": "audio.%(ext)s"},
+            "logger": _Logger(),
+            "noplaylist": True,
+            "progress_hooks": [hook],
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([job.video["url"]])
+        audio = next((os.path.join(tmp, f) for f in os.listdir(tmp) if f.startswith("audio.")
+                      and not f.endswith((".part", ".ytdl"))), None)
+        if not audio or not has_audio(audio):
+            raise RuntimeError("YouTube didn't provide a sound track for this video")
+
+        base, ext = os.path.splitext(video)
+        for out_ext in (ext, ".mkv"):  # MKV accepts any codec pairing if the original container won't
+            out = os.path.join(tmp, "joined" + out_ext)
+            r = run_ffmpeg(["-y", "-i", video, "-i", audio, "-map", "0:v", "-map", "1:a:0", "-c", "copy",
+                            *(["-movflags", "+faststart"] if out_ext in (".mp4", ".m4v", ".mov") else []), out])
+            if r.returncode == 0 and os.path.isfile(out) and has_audio(out):
+                final = base + out_ext
+                shutil.move(out, final)
+                if final != video:
+                    os.remove(video)
+                return final
+        raise RuntimeError("ffmpeg couldn't add the sound track")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _forget_in_archive(archive: str | None, filename: str) -> None:
+    """Drop a video from the 'already downloaded' list so it isn't skipped next time."""
+    m = re.search(r"\[([A-Za-z0-9_-]{11})\]", os.path.basename(filename or ""))
+    if not archive or not m or not os.path.isfile(archive):
+        return
+    try:
+        with open(archive, encoding="utf-8") as f:
+            lines = f.readlines()
+        keep = [ln for ln in lines if ln.strip().split(" ")[-1] != m.group(1)]
+        if len(keep) != len(lines):
+            with open(archive, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+    except OSError:
+        pass
+
+
+_LEFTOVER_RE = re.compile(r"(\.part(-Frag\d+)?|\.ytdl|\.temp\.\w+|\.f[\w-]+\.\w+(\.part)?)$")
+
+
+def _remove_leftovers(job: Job) -> None:
+    """Delete half-finished pieces of a failed or stopped download.
+
+    This includes video-only and audio-only parts (``name.f137.mp4``) that would otherwise
+    sit in the folder looking like a finished video with no sound.
+    """
+    candidates = set(job.temp_files)
+    for path in list(job.temp_files):
+        candidates.update({path + ".part", path + ".ytdl"})
+    for path in candidates:
+        if path and _LEFTOVER_RE.search(path) and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass

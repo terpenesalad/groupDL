@@ -38,7 +38,10 @@ groupDL opens in your web browser. It runs entirely on your computer; the small 
 2. For channels, choose which parts to show: **Videos**, **Shorts** and/or **Live**.
 3. Click **Show videos**. Everything is ticked except upcoming premieres, live streams and members-only videos.
 4. Click a video to tick or untick it. Shift-click to tick or untick a whole run. **Tick all** / **Untick all** apply to whatever matches the title filter, and each section has its own **Tick these** / **Untick these**.
-5. Pick a format and a folder, then click **Download**. Progress shows on each thumbnail and in **Downloads**, where you can stop, retry failed videos or open the folder.
+5. Pick a format and a folder, then click **Download**. Progress shows on each thumbnail and in **Downloads**.
+6. To cancel a big batch, click **Stop all** in the bottom bar. In **Downloads** you can also use **Stop waiting ones** (lets the videos already downloading finish and drops the rest), stop single videos, or **Retry all** to restart anything stopped or failed.
+
+Every finished video is checked for sound. If YouTube's video and sound tracks didn't get joined, groupDL fetches the sound on its own and adds it. Half-finished pieces of stopped or failed downloads are deleted, so you won't find silent `.f137.mp4`-style files in your folder.
 
 ### Formats
 
@@ -56,7 +59,7 @@ Settings are remembered in `~/.groupdl/settings.json`.
 
 ## Running from source
 
-Needs Python 3.10 or newer.
+Needs Python 3.10 or newer, and ffmpeg installed on your computer (`winget install ffmpeg`, `brew install ffmpeg` or your Linux package manager). The ffmpeg that pip installs as a fallback can crash when joining some YouTube streams.
 
 ```sh
 git clone https://github.com/terpenesalad/groupDL
@@ -71,7 +74,9 @@ Build a single-file executable for the computer you're on:
 
 ```sh
 pip install -r requirements.txt pyinstaller
-python scripts/build.py   # result in dist/
+python scripts/fetch_ffmpeg.py            # downloads a static ffmpeg into build/ffmpeg
+python scripts/build.py --ffmpeg build/ffmpeg/ffmpeg   # result in dist/ (add .exe on Windows)
+dist/groupDL --self-test                  # checks the bundled ffmpeg can join video and sound
 ```
 
 Run the tests with `pip install pytest && pytest`.

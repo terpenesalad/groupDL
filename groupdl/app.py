@@ -312,8 +312,9 @@ def make_handler(app: App):
                     ids = app.manager.add(clean, app.settings)
                     self._json({"added": len(ids)})
                 elif path == "/api/cancel":
-                    app.manager.cancel(body.get("ids") or None)
-                    self._json({"ok": True})
+                    stopped = app.manager.cancel(body.get("ids") or None,
+                                                 waiting_only=bool(body.get("waiting_only")))
+                    self._json({"stopped": stopped})
                 elif path == "/api/retry":
                     app.manager.retry(body.get("ids") or None)
                     self._json({"ok": True})
@@ -379,12 +380,58 @@ def _idle_watch(app: App) -> None:
             return
 
 
+def self_test() -> int:
+    """Join a separate video and sound track the way a YouTube download does, and check the result."""
+    import tempfile
+
+    from .tools import media_streams, run_ffmpeg
+
+    ffmpeg, deno = find_ffmpeg(), find_deno()
+    print(f"ffmpeg: {ffmpeg}\ndeno: {deno}")
+    if not ffmpeg or not deno:
+        print("FAIL: helper program missing")
+        return 1
+    r = subprocess.run([deno, "--version"], capture_output=True, text=True)
+    print(r.stdout.splitlines()[0] if r.stdout else r.stderr)
+    if r.returncode != 0:
+        print("FAIL: deno doesn't run")
+        return 1
+    with tempfile.TemporaryDirectory() as tmp:
+        v, a = os.path.join(tmp, "v.f1.mp4"), os.path.join(tmp, "a.f2.mp4")
+        steps = [
+            ["-y", "-f", "lavfi", "-i", "testsrc=d=2:s=320x240:r=25", "-c:v", "mpeg2video", "-f", "mpegts", v],
+            ["-y", "-f", "lavfi", "-i", "sine=d=2", "-c:a", "aac", "-f", "mpegts", a],
+        ]
+        for fmt, ext in (("mp4", ".mp4"), ("mkv", ".mkv")):
+            out = os.path.join(tmp, "joined" + ext)
+            steps.append(["-y", "-i", v, "-i", a, "-c", "copy", "-map", "0:v:0", "-map", "1:a:0",
+                          *(["-bsf:a:0", "aac_adtstoasc"] if fmt == "mp4" else []), out])
+        for step in steps:
+            r = run_ffmpeg(step, timeout=120)
+            if r.returncode != 0:
+                print("FAIL: ffmpeg", " ".join(step), "\n", r.stderr[-800:])
+                return 1
+        for ext in (".mp4", ".mkv"):
+            streams = media_streams(os.path.join(tmp, "joined" + ext))
+            print(f"joined{ext}: {streams}")
+            if streams != {"video": 1, "audio": 1}:
+                print("FAIL: joined file is missing a stream")
+                return 1
+    print("OK")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="groupdl", description="Pick and bulk-download YouTube videos.")
     parser.add_argument("--port", type=int, default=None, help="port to listen on (default 47862)")
     parser.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     parser.add_argument("--version", action="version", version=f"groupDL {__version__}")
+    parser.add_argument("--self-test", action="store_true",
+                        help="check that the bundled ffmpeg and Deno work, then exit")
     args = parser.parse_args(argv)
+
+    if args.self_test:
+        raise SystemExit(self_test())
 
     if args.port is None and (url := _existing_instance()):
         print(f"groupDL is already running: {url}")

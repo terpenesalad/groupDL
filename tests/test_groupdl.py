@@ -200,3 +200,55 @@ def test_http_flow(server):
     assert [j["status"] for j in st["jobs"]] == ["done"] * 3
     assert st["settings"]["format"] == "mp3" and st["settings"]["concurrency"] == 3
     assert _call(server, "/api/download", {"videos": []})[0] == 400
+
+
+def test_stop_waiting_only_and_stop_all():
+    gate = threading.Event()
+
+    def slow(job, mgr):
+        while not gate.is_set():
+            if job.cancel_requested:
+                raise Exception("cancelled")
+            time.sleep(0.02)
+
+    m = DownloadManager(download_fn=slow)
+    m.add([{"id": str(i), "url": f"u/{i}"} for i in range(6)], {"concurrency": 2})
+    assert _wait(lambda: sum(j["status"] == "downloading" for j in m.snapshot()) == 2)
+    assert m.cancel(waiting_only=True) == 4
+    st = [j["status"] for j in m.snapshot()]
+    assert st.count("cancelled") == 4 and st.count("downloading") == 2
+    assert m.cancel() == 2
+    assert _wait(lambda: not m.busy())
+    assert all(j["status"] == "cancelled" for j in m.snapshot())
+
+
+def test_failed_job_removes_silent_parts(tmp_path):
+    video_part = tmp_path / "Clip [abcdefghijk].f137.mp4"
+    audio_part = tmp_path / "Clip [abcdefghijk].f140.m4a.part"
+    keep = tmp_path / "Other [zzzzzzzzzzz].mp4"
+    for f in (video_part, audio_part, keep):
+        f.write_bytes(b"x")
+
+    def failing(job, mgr):
+        job.temp_files.update({str(video_part), str(audio_part)[:-5], str(keep)})
+        raise Exception("ERROR: Postprocessing:   libpostproc    58.  1.100 / 58.  1.100")
+
+    m = DownloadManager(download_fn=failing)
+    m.add([{"id": "a", "url": "u/a"}], {})
+    assert _wait(lambda: not m.busy())
+    job = m.snapshot()[0]
+    assert job["status"] == "error" and job["error"] == "Couldn't join the video and its sound into one file."
+    assert not video_part.exists() and not audio_part.exists() and keep.exists()
+
+
+def test_media_streams(tmp_path):
+    from groupdl.tools import find_ffmpeg, media_streams, run_ffmpeg
+
+    if not find_ffmpeg():
+        pytest.skip("no ffmpeg")
+    silent, both = str(tmp_path / "silent.mkv"), str(tmp_path / "both.mkv")
+    run_ffmpeg(["-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1", "-c:v", "ffv1", silent])
+    run_ffmpeg(["-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1", "-f", "lavfi", "-i", "sine=d=1",
+                "-c:v", "ffv1", "-c:a", "flac", "-shortest", both])
+    assert media_streams(silent) == {"video": 1, "audio": 0}
+    assert media_streams(both) == {"video": 1, "audio": 1}

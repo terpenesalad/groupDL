@@ -1,6 +1,4 @@
-First release of groupDL.
-
-Paste YouTube channel, playlist or video links, see every video as a thumbnail, untick what you don't want and download the rest in one batch.
+Fixes videos downloading without sound, and adds a one-click way to cancel a big batch.
 
 **Download the file for your computer below:**
 
@@ -8,14 +6,19 @@ Paste YouTube channel, playlist or video links, see every video as a thumbnail, 
 - Mac (Apple silicon): `groupDL-macos-arm64`
 - Linux (x86-64): `groupDL-linux`
 
-yt-dlp, ffmpeg and Deno are built in, so there's nothing else to install. See the [README](https://github.com/terpenesalad/groupDL#download) for first-run steps on Mac.
+### Fixed: videos with no sound
 
-What's in it:
+YouTube sends the picture and the sound as separate files, and groupDL joins them with ffmpeg. The ffmpeg bundled in 1.0.0 could crash on some of YouTube's stream types, which left only the picture-only part (named like `… .f137.mp4`) in your folder.
 
-- Channels (Videos, Shorts and Live tabs), playlists, a channel's playlists page, single videos and bare `@handles`
-- Tick/untick by click, shift-click ranges, per-section and filtered "tick all"
-- Filter by title and sort by date, length, views or title
-- Best quality, 1080p, 720p or 480p video; MP3 or M4A audio
-- 1 to 6 downloads at a time, with per-video progress, stop and retry
-- Optional per-channel folders and skipping videos you've already downloaded
-- Optional sign-in through your browser's YouTube cookies for age-restricted, members-only or "not a bot" checks
+- Release builds now bundle yt-dlp's own patched ffmpeg (Windows, Linux) and Martin Riedl's static ffmpeg (Mac), and every build is tested joining a separate video and sound track before it's published.
+- Every finished video is checked for sound. If it has none, groupDL downloads the sound track and adds it.
+- Stopped or failed downloads no longer leave silent picture-only files behind.
+- When joining does fail, the error now says so in plain words.
+
+If you have a silent video from 1.0.0, just download it again.
+
+### New: bulk cancel
+
+- **Stop all** appears in the bottom bar whenever downloads are running and stops every running and waiting download at once.
+- **Stop waiting ones** in Downloads lets the videos already in progress finish and drops the rest of the queue.
+- **Retry all** restarts everything that was stopped or failed.
