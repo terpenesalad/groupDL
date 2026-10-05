@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "groupdl"
+dynamic = ["version"]
+description = "Paste a YouTube channel, playlist or video link, tick the videos you want, and download them all at once."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "yt-dlp[default]>=2026.8.19",
+    "imageio-ffmpeg>=0.6.0",
+    "deno>=2.5",
+]
+
+[project.scripts]
+groupdl = "groupdl.app:main"
+
+[tool.setuptools]
+packages = ["groupdl"]
+
+[tool.setuptools.package-data]
+groupdl = ["static/*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "groupdl.__version__" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
